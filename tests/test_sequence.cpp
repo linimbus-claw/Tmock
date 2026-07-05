@@ -1,23 +1,22 @@
-// tests/test_sequence.cpp
+// tests/test_sequence.cpp — Tmock v1.0
 
 #include <cassert>
 #include <iostream>
 #include <string>
+#include <functional>
 #include "tmock/tmock.h"
 
 class DataService {
 public:
     virtual ~DataService() = default;
     virtual void send(const std::string& data) = 0;
-    virtual void recv(std::function<void(const std::string&)>) = 0;
     virtual bool ack(int id) = 0;
 };
 
 class MockDataService : public DataService {
 public:
-    MOCK_METHOD_VOID1(send, const std::string&);
-    MOCK_METHOD_VOID1(recv, std::function<void(const std::string&)>);
-    MOCK_METHOD1(bool, ack, int);
+    MOCK_METHOD(void, send, (const std::string&));
+    MOCK_METHOD(bool, ack, (int));
 };
 
 int main() {
@@ -33,12 +32,12 @@ int main() {
         seq.enabled = true;
 
         MockDataService mock;
-        mock.core_send.addExpectation()
-            .willInvoke([=](const std::string& d) {
+        EXPECT_CALL(mock, send, void, (const std::string&), _)
+            .Invoke([](const std::string& d) {
                 tmock_record_call("send:" + d);
             });
-        mock.core_ack.addExpectation()
-            .willInvoke([=](int id) {
+        EXPECT_CALL(mock, ack, bool, (int), _)
+            .Invoke([](int id) {
                 tmock_record_call("ack:" + std::to_string(id));
                 return true;
             });
@@ -62,12 +61,12 @@ int main() {
         seq.enabled = true;
 
         MockDataService mock;
-        mock.core_send.addExpectation()
-            .willInvoke([=](const std::string& d) {
+        EXPECT_CALL(mock, send, void, (const std::string&), _)
+            .Invoke([](const std::string& d) {
                 tmock_record_call("send:" + d);
             });
-        mock.core_ack.addExpectation()
-            .willInvoke([=](int id) {
+        EXPECT_CALL(mock, ack, bool, (int), _)
+            .Invoke([](int id) {
                 tmock_record_call("ack:" + std::to_string(id));
                 return true;
             });

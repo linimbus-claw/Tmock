@@ -1,22 +1,12 @@
 // tmock.h - Tmock C++17 Mock Framework (header-only)
-// v0.8.0 - working withArgs with std::function args
 //
-// Macro API:
-//   MOCK_METHOD0(Ret, Name)                         // 0 arg
-//   MOCK_METHOD1(Ret, Name, T0)                    // 1 arg
-//   MOCK_METHOD2(Ret, Name, T0, T1)               // 2 args
-//   MOCK_METHOD3(Ret, Name, T0, T1, T2)          // 3 args
-//   MOCK_METHOD4(Ret, Name, T0, T1, T2, T3)     // 4 args
-//   MOCK_METHOD5(Ret, Name, T0, T1, T2, T3, T4) // 5 args
-//   MOCK_METHOD_VOID0(Name)
-//   MOCK_METHOD_VOID1(Name, T0)
-//   ...
+// v1.0.1 - EXPECT_CALL + built-in matchers
 //
-// Usage:
-//   class MockFoo : public Foo {
-//   public:
-//     MOCK_METHOD2(bool, login, const std::string&, int);
-//   };
+// 用法：
+//   MOCK_METHOD(Ret, Name, (T0, T1, ...))   // 括号包裹类型
+//   EXPECT_CALL(mock, Name, Ret, (T0,T1,...), matchers...).Return(val).Times(n)
+//
+// Matchers: _  An<T>()  Eq(v)  Matcher(fn)  HasPrefix(s)  Not(m)
 
 #ifndef TMOCK_H_
 #define TMOCK_H_
@@ -35,152 +25,141 @@
 #include <vector>
 
 // ============================================================
-//  withArgs 辅助：检测类型是否有 operator==
+//  Matchers
 // ============================================================
-template <typename T, typename = void>
-struct TmockIsComparable : std::false_type {};
 
-template <typename T>
-struct TmockIsComparable<T, std::void_t<decltype(
-    std::declval<T>() == std::declval<T>())>> : std::true_type {};
+// 通配符
+struct _TmockWildcard {
+    template <typename T> bool matches(const T&) const { return true; }
+};
+inline constexpr _TmockWildcard _{};
 
-// 比较两个值（不可比较的类型跳过）
-template <typename T>
-bool tmock_compare_one(const T& a, const T& b) {
-    if constexpr (TmockIsComparable<T>::value) {
-        return a == b;
+// 任意 T
+template <typename T> struct _TmockAny {
+    template <typename U = T> bool matches(U&&) const { return true; }
+};
+template <typename T> _TmockAny<T> An() { return {}; }
+
+// Eq
+template <typename T> struct _TmockEq {
+    T value;
+    explicit _TmockEq(const T& v) : value(v) {}
+    template <typename U> bool matches(U&& u) const { return value == u; }
+};
+template <typename T> _TmockEq<T> Eq(const T& v) { return _TmockEq<T>(v); }
+
+// Matcher(fn)
+template <typename T, typename Pred> struct _TmockPred {
+    Pred pred;
+    _TmockPred(Pred p) : pred(std::move(p)) {}
+    template <typename U> bool matches(U&& u) const { return pred(u); }
+};
+template <typename T, typename Pred>
+_TmockPred<T, Pred> Matcher(Pred p) { return _TmockPred<T, Pred>(std::move(p)); }
+
+// HasPrefix
+template <typename T = std::string> struct _TmockHasPrefix {
+    std::string prefix;
+    _TmockHasPrefix(std::string p) : prefix(std::move(p)) {}
+    template <typename U> bool matches(U&& u) const {
+        return u.size() >= prefix.size() &&
+               u.compare(0, prefix.size(), prefix) == 0;
+    }
+};
+template <typename T = std::string>
+_TmockHasPrefix<T> HasPrefix(std::string p) { return _TmockHasPrefix<T>(std::move(p)); }
+
+// Not
+template <typename M> struct _TmockNot {
+    M m;
+    _TmockNot(M mm) : m(std::move(mm)) {}
+    template <typename U> bool matches(U&& u) const { return !m.matches(u); }
+};
+template <typename M> _TmockNot<M> Not(M m) { return _TmockNot<M>(std::move(m)); }
+
+// Matcher 检测：直接检测是否有 matches(U&&) 方法
+template <typename T, typename A, typename = void>
+struct TmockHasMatches : std::false_type {};
+template <typename T, typename A>
+struct TmockHasMatches<T, A, std::void_t<decltype(
+    std::declval<T>().matches(std::declval<A>()))>> : std::true_type {};
+template <typename T> struct _TmockArg { using type = T; };
+
+// 比较单个值
+template <typename E, typename A>
+bool tmock_cmp(const E& expected, const A& actual) {
+    if constexpr (TmockHasMatches<E, const A&>::value) {
+        return expected.matches(actual);
+    } else if constexpr (std::is_invocable_v<E, A>) {
+        return expected(actual);
     } else {
-        return true;  // 跳过
+        return expected == actual;
     }
 }
 
-// 用 tuple + index_sequence 逐个比较
-template <typename... Args, size_t... Is>
-bool tmock_compare_tuples_impl(const std::tuple<Args...>& expected,
-                                const std::tuple<Args...>& actual,
-                                std::index_sequence<Is...>) {
-    bool ok = true;
-    ((ok = ok && tmock_compare_one(std::get<Is>(expected),
-                                   std::get<Is>(actual))),
-     ...);
-    return ok;
+// const char* → string 特化
+inline bool tmock_cmp(const char* a, const std::string& b) {
+    return b == a;
 }
-
-template <typename... Args>
-bool tmock_compare_tuples(const std::tuple<Args...>& expected,
-                            const std::tuple<Args...>& actual) {
-    return tmock_compare_tuples_impl(
-        expected, actual, std::make_index_sequence<sizeof...(Args)>{});
+inline bool tmock_cmp(const std::string& a, const char* b) {
+    return a == b;
 }
+inline bool tmock_cmp(char a, char b) { return a == b; }
 
 // ============================================================
 //  TmockExpectation
 // ============================================================
 template <typename Ret, typename... Args>
 struct TmockExpectation {
-  using MatcherFn = std::function<bool(const Args&...)>;
-  using ActionFn  = std::function<Ret(const Args&...)>;
+    std::function<bool(const Args&...)> matcher;
+    std::function<Ret(const Args&...)> action;
+    int minTimes = 1, maxTimes = 1, actual = 0;
 
-  MatcherFn matcher;
-  ActionFn  action;
-  int       minTimes = 1;
-  int       maxTimes = 1;
-  int       actual   = 0;
+    bool matches(const Args&... args) const {
+        return !matcher || matcher(args...);
+    }
+    bool isSatisfied() const {
+        return actual >= minTimes && (maxTimes < 0 || actual <= maxTimes);
+    }
 
-  bool matches(const Args&... args) const {
-    if (!matcher) return true;
-    return matcher(args...);
-  }
-  bool isSaturated() const { return maxTimes >= 0 && actual >= maxTimes; }
-  bool isSatisfied() const {
-    return actual >= minTimes && (maxTimes < 0 || actual <= maxTimes);
-  }
-
-  // withArgs：按值匹配（自动跳过不可比较类型如 std::function）
-  TmockExpectation& withArgs(const Args&... expected) {
-    matcher = [=](const Args&... actual) {
-      return tmock_compare_tuples(std::make_tuple(expected...),
-                                  std::make_tuple(actual...));
-    };
-    return *this;
-  }
-
-  TmockExpectation& with(MatcherFn m) {
-    matcher = std::move(m);
-    return *this;
-  }
-
-  TmockExpectation& willReturn(Ret val) {
-    action = [val](const Args&...) { return val; };
-    return *this;
-  }
-
-  template <typename Fn>
-  TmockExpectation& willInvoke(Fn&& fn) {
-    action = std::forward<Fn>(fn);
-    return *this;
-  }
-
-  TmockExpectation& times(int n) {
-    minTimes = n; maxTimes = n; return *this;
-  }
-  TmockExpectation& times(int lo, int hi) {
-    minTimes = lo; maxTimes = hi; return *this;
-  }
-  TmockExpectation& atLeast(int n) {
-    minTimes = n; maxTimes = -1; return *this;
-  }
+    TmockExpectation& with(std::function<bool(const Args&...)> m) {
+        matcher = std::move(m); return *this;
+    }
+    TmockExpectation& willReturn(Ret val) {
+        action = [val](const Args&...) { return val; }; return *this;
+    }
+    template <typename F>
+    TmockExpectation& willInvoke(F&& fn) {
+        action = std::forward<F>(fn); return *this;
+    }
+    TmockExpectation& times(int n) { minTimes = n; maxTimes = n; return *this; }
+    TmockExpectation& times(int lo, int hi) { minTimes = lo; maxTimes = hi; return *this; }
+    TmockExpectation& atLeast(int n) { minTimes = n; maxTimes = -1; return *this; }
 };
 
-// void 特化
 template <typename... Args>
 struct TmockExpectation<void, Args...> {
-  using MatcherFn = std::function<bool(const Args&...)>;
-  using ActionFn  = std::function<void(const Args&...)>;
+    std::function<bool(const Args&...)> matcher;
+    std::function<void(const Args&...)> action;
+    int minTimes = 1, maxTimes = 1, actual = 0;
 
-  MatcherFn matcher;
-  ActionFn  action;
-  int       minTimes = 1;
-  int       maxTimes = 1;
-  int       actual   = 0;
+    bool matches(const Args&... args) const {
+        return !matcher || matcher(args...);
+    }
+    bool isSatisfied() const {
+        return actual >= minTimes && (maxTimes < 0 || actual <= maxTimes);
+    }
 
-  bool matches(const Args&... args) const {
-    if (!matcher) return true;
-    return matcher(args...);
-  }
-  bool isSaturated() const { return maxTimes >= 0 && actual >= maxTimes; }
-  bool isSatisfied() const {
-    return actual >= minTimes && (maxTimes < 0 || actual <= maxTimes);
-  }
-
-  TmockExpectation& withArgs(const Args&... expected) {
-    matcher = [=](const Args&... actual) {
-      return tmock_compare_tuples(std::make_tuple(expected...),
-                                  std::make_tuple(actual...));
-    };
-    return *this;
-  }
-
-  TmockExpectation& with(MatcherFn m) {
-    matcher = std::move(m);
-    return *this;
-  }
-
-  template <typename Fn>
-  TmockExpectation& willInvoke(Fn&& fn) {
-    action = std::forward<Fn>(fn);
-    return *this;
-  }
-
-  TmockExpectation& times(int n) {
-    minTimes = n; maxTimes = n; return *this;
-  }
-  TmockExpectation& times(int lo, int hi) {
-    minTimes = lo; maxTimes = hi; return *this;
-  }
-  TmockExpectation& atLeast(int n) {
-    minTimes = n; maxTimes = -1; return *this;
-  }
+    TmockExpectation& with(std::function<bool(const Args&...)> m) {
+        matcher = std::move(m); return *this;
+    }
+    template <typename F>
+    TmockExpectation& willInvoke(F&& fn) {
+        action = std::forward<F>(fn); return *this;
+    }
+    TmockExpectation& times(int n) { minTimes = n; maxTimes = n; return *this; }
+    TmockExpectation& times(int lo, int hi) { minTimes = lo; maxTimes = hi; return *this; }
+    TmockExpectation& atLeast(int n) { minTimes = n; maxTimes = -1; return *this; }
 };
 
 // ============================================================
@@ -189,259 +168,287 @@ struct TmockExpectation<void, Args...> {
 template <typename Ret, typename... Args>
 class TmockCore {
 public:
-  using Expect = TmockExpectation<Ret, Args...>;
-
-  ~TmockCore() { verify(); }
-
-  Expect& addExpectation() {
-    std::lock_guard<std::mutex> lock(mu_);
-    expects_.emplace_back();
-    return expects_.back();
-  }
-
-  Expect& expect(const Args&... args) {
-    auto& e = addExpectation();
-    e.withArgs(args...);
-    return e;
-  }
-
-  Ret call(const Args&... args) {
-    std::lock_guard<std::mutex> lock(mu_);
-    for (auto& e : expects_) {
-      if (e.matches(args...) && !e.isSaturated()) {
-        e.actual++;
-        if (e.action) return e.action(args...);
-        break;
-      }
+    using Expect = TmockExpectation<Ret, Args...>;
+    Expect& addExpectation() {
+        std::lock_guard<std::mutex> lock(mu_);
+        expects_.emplace_back(); return expects_.back();
     }
-    if constexpr (std::is_default_constructible_v<Ret> && !std::is_void_v<Ret>) {
-      return Ret{};
-    } else if constexpr (std::is_void_v<Ret>) {
-      return;
-    } else {
-      throw std::runtime_error("Tmock: no matching expectation");
-    }
-  }
 
-  void verify() const {
-    std::lock_guard<std::mutex> lock(mu_);
-    for (const auto& e : expects_) {
-      if (!e.isSatisfied()) {
-        std::ostringstream os;
-        os << "[Tmock] VERIFY FAILED:"
-           << "  expected [" << e.minTimes << ", "
-           << (e.maxTimes < 0 ? "inf" : std::to_string(e.maxTimes))
-           << "]  actual=" << e.actual;
-        std::cerr << os.str() << std::endl;
-      }
+    Ret call(const Args&... args) {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (auto& e : expects_) {
+            if (e.matches(args...) && e.actual < e.maxTimes) {
+                e.actual++;
+                if (e.action) return e.action(args...);
+                break;
+            }
+        }
+        if constexpr (std::is_void_v<Ret>) return;
+        else if constexpr (std::is_default_constructible_v<Ret>) return Ret{};
+        else throw std::runtime_error("Tmock: no matching expectation");
     }
-  }
 
-  void reset() {
-    std::lock_guard<std::mutex> lock(mu_);
-    expects_.clear();
-  }
+    void verify() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (const auto& e : expects_) {
+            if (!e.isSatisfied()) {
+                std::cerr << "[Tmock] Unsatisfied: expected ["
+                          << e.minTimes << ", "
+                          << (e.maxTimes < 0 ? "inf" : std::to_string(e.maxTimes))
+                          << "] actual=" << e.actual << std::endl;
+            }
+        }
+    }
+    bool allSatisfied() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (const auto& e : expects_) if (!e.isSatisfied()) return false;
+        return true;
+    }
+    void reset() { std::lock_guard<std::mutex> lock(mu_); expects_.clear(); }
 
 private:
-  mutable std::mutex mu_;
-  std::vector<Expect> expects_;
+    mutable std::mutex mu_;
+    std::vector<Expect> expects_;
 };
 
 template <typename... Args>
 class TmockCore<void, Args...> {
 public:
-  using Expect = TmockExpectation<void, Args...>;
-
-  ~TmockCore() { verify(); }
-
-  Expect& addExpectation() {
-    std::lock_guard<std::mutex> lock(mu_);
-    expects_.emplace_back();
-    return expects_.back();
-  }
-
-  Expect& expect(const Args&... args) {
-    auto& e = addExpectation();
-    e.withArgs(args...);
-    return e;
-  }
-
-  void call(const Args&... args) {
-    std::lock_guard<std::mutex> lock(mu_);
-    for (auto& e : expects_) {
-      if (e.matches(args...) && !e.isSaturated()) {
-        e.actual++;
-        if (e.action) e.action(args...);
-        return;
-      }
+    using Expect = TmockExpectation<void, Args...>;
+    Expect& addExpectation() {
+        std::lock_guard<std::mutex> lock(mu_);
+        expects_.emplace_back(); return expects_.back();
     }
-  }
-
-  void verify() const {
-    std::lock_guard<std::mutex> lock(mu_);
-    for (const auto& e : expects_) {
-      if (!e.isSatisfied()) {
-        std::cerr << "[Tmock] VERIFY FAILED" << std::endl;
-      }
+    void call(const Args&... args) {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (auto& e : expects_) {
+            if (e.matches(args...) && e.actual < e.maxTimes) {
+                e.actual++;
+                if (e.action) e.action(args...);
+                return;
+            }
+        }
     }
-  }
-
-  void reset() {
-    std::lock_guard<std::mutex> lock(mu_);
-    expects_.clear();
-  }
+    void verify() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (const auto& e : expects_) {
+            if (!e.isSatisfied()) std::cerr << "[Tmock] Unsatisfied expectation" << std::endl;
+        }
+    }
+    bool allSatisfied() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (const auto& e : expects_) if (!e.isSatisfied()) return false;
+        return true;
+    }
+    void reset() { std::lock_guard<std::mutex> lock(mu_); expects_.clear(); }
 
 private:
-  mutable std::mutex mu_;
-  std::vector<Expect> expects_;
+    mutable std::mutex mu_;
+    std::vector<Expect> expects_;
 };
 
 // ============================================================
-//  MOCK_METHOD0 .. MOCK_METHOD5 宏
+// ============================================================
+//  EXPECT_CALL
+//
+// 设计：matchers 存入 std::tuple<Ms...>，index_sequence 逐个比较
+// 用法：EXPECT_CALL(mock, login, bool, (const string&, int), "alice", _).Return(true)
+//
+// 链式方法：.Return(val) .Invoke(fn) .Times(n) .AtLeast(n) .with(fn)
 // ============================================================
 
-#define MOCK_METHOD0(Ret, Name)                               \
-  public:                                                          \
-    TmockCore<Ret> core_##Name;                               \
-    Ret Name() override {                                       \
-      return core_##Name.call();                               \
+template <typename Ret, typename... Args>
+class _TmockCall {
+    TmockCore<Ret, Args...>* core_;
+
+    // 逐个比较：matchers[i] vs actuals[i]
+    // 用 auto 捕获器 lambda + index_sequence，确保 (index, actual) 两个参数
+    // 展开：ok=(ok&&check(0,a₀)), ok=(ok&&check(1,a₁)), ... 短路求值
+    template <typename... Ms, size_t... Is>
+    static bool match_tuple_impl(const std::tuple<Ms...>& ms,
+                                  const Args&... actual,
+                                  std::index_sequence<Is...>) {
+        bool ok = true;
+        ((ok = (ok && ([ms](auto I, const auto& a) -> bool {
+                        return tmock_cmp(std::get<I>(ms), a);
+                    }(std::integral_constant<size_t, Is>{}, actual)))), ...);
+        return ok;
     }
 
-#define MOCK_METHOD1(Ret, Name, T0)                         \
-  public:                                                          \
-    TmockCore<Ret, T0> core_##Name;                        \
-    Ret Name(T0 tmock_a0) override {                        \
-      return core_##Name.call(tmock_a0);                   \
+    template <typename... Ms>
+    static bool match_tuple(const std::tuple<Ms...>& ms, const Args&... actual) {
+        return match_tuple_impl(ms, actual..., std::make_index_sequence<sizeof...(Ms)>{});
     }
 
-#define MOCK_METHOD2(Ret, Name, T0, T1)                   \
-  public:                                                          \
-    TmockCore<Ret, T0, T1> core_##Name;                  \
-    Ret Name(T0 tmock_a0, T1 tmock_a1) override {        \
-      return core_##Name.call(tmock_a0, tmock_a1);       \
+    std::function<bool(const Args&...)> matcher_fn_;
+
+public:
+    template <typename... Ms>
+    _TmockCall(TmockCore<Ret, Args...>* c, std::tuple<Ms...> matchers)
+        : core_(c) {
+        auto ms_copy = matchers;
+        matcher_fn_ = [ms_copy](const Args&... actual) -> bool {
+            return match_tuple(ms_copy, actual...);
+        };
     }
 
-#define MOCK_METHOD3(Ret, Name, T0, T1, T2)             \
-  public:                                                          \
-    TmockCore<Ret, T0, T1, T2> core_##Name;            \
-    Ret Name(T0 tmock_a0, T1 tmock_a1, T2 tmock_a2)    \
-        override {                                              \
-      return core_##Name.call(tmock_a0, tmock_a1, tmock_a2); \
+    // 复用同一个 Expectation：matcher_fn_ 来自构造函数的 matchers，
+    // with() 覆盖为自定义 matcher，后续 Return/Invoke/Times 共用同一个 Expectation
+    TmockExpectation<Ret, Args...>* lastExpectation_ = nullptr;
+
+    template <typename Fn>
+    _TmockCall& with(Fn fn) {
+        if (!lastExpectation_) lastExpectation_ = &core_->addExpectation();
+        // 合并：stored matchers OR custom matcher
+        auto orig = matcher_fn_;
+        lastExpectation_->with([orig=std::move(orig), fn=std::move(fn)](const Args&... a) {
+            return orig(a...) || fn(a...);
+        });
+        return *this;
     }
 
-#define MOCK_METHOD4(Ret, Name, T0, T1, T2, T3)       \
-  public:                                                          \
-    TmockCore<Ret, T0, T1, T2, T3> core_##Name;      \
-    Ret Name(T0 tmock_a0, T1 tmock_a1, T2 tmock_a2,    \
-             T3 tmock_a3) override {                        \
-      return core_##Name.call(tmock_a0, tmock_a1,         \
-                              tmock_a2, tmock_a3);       \
+    template <typename V>
+    _TmockCall& Return(V val) {
+        if (!lastExpectation_) lastExpectation_ = &core_->addExpectation();
+        lastExpectation_->with(matcher_fn_);
+        lastExpectation_->willReturn(val);
+        return *this;
     }
 
-#define MOCK_METHOD5(Ret, Name, T0, T1, T2, T3, T4) \
-  public:                                                          \
-    TmockCore<Ret, T0, T1, T2, T3, T4> core_##Name; \
-    Ret Name(T0 tmock_a0, T1 tmock_a1, T2 tmock_a2,    \
-             T3 tmock_a3, T4 tmock_a4) override {         \
-      return core_##Name.call(tmock_a0, tmock_a1,         \
-                              tmock_a2, tmock_a3, tmock_a4); \
+    template <typename Fn>
+    _TmockCall& Invoke(Fn fn) {
+        if (!lastExpectation_) lastExpectation_ = &core_->addExpectation();
+        lastExpectation_->with(matcher_fn_);
+        lastExpectation_->willInvoke(fn);
+        return *this;
     }
 
-// ---- void 版本 ----
-#define MOCK_METHOD_VOID0(Name)                              \
-  public:                                                          \
-    TmockCore<void> core_##Name;                             \
-    void Name() override {                                          \
-      core_##Name.call();                                         \
+    _TmockCall& Times(int n) {
+        if (!lastExpectation_) lastExpectation_ = &core_->addExpectation();
+        lastExpectation_->with(matcher_fn_);
+        lastExpectation_->times(n);
+        return *this;
     }
 
-#define MOCK_METHOD_VOID1(Name, T0)                         \
-  public:                                                          \
-    TmockCore<void, T0> core_##Name;                      \
-    void Name(T0 tmock_a0) override {                      \
-      core_##Name.call(tmock_a0);                          \
+    _TmockCall& Times(int lo, int hi) {
+        if (!lastExpectation_) lastExpectation_ = &core_->addExpectation();
+        lastExpectation_->with(matcher_fn_);
+        lastExpectation_->times(lo, hi);
+        return *this;
     }
 
-#define MOCK_METHOD_VOID2(Name, T0, T1)                   \
-  public:                                                          \
-    TmockCore<void, T0, T1> core_##Name;                \
-    void Name(T0 tmock_a0, T1 tmock_a1) override {     \
-      core_##Name.call(tmock_a0, tmock_a1);             \
+    _TmockCall& AtLeast(int n) {
+        if (!lastExpectation_) lastExpectation_ = &core_->addExpectation();
+        lastExpectation_->with(matcher_fn_);
+        lastExpectation_->atLeast(n);
+        return *this;
     }
 
-#define MOCK_METHOD_VOID3(Name, T0, T1, T2)           \
-  public:                                                          \
-    TmockCore<void, T0, T1, T2> core_##Name;        \
-    void Name(T0 tmock_a0, T1 tmock_a1, T2 tmock_a2) \
-        override {                                              \
-      core_##Name.call(tmock_a0, tmock_a1, tmock_a2);  \
-    }
+    void verify() const { core_->verify(); }
+    bool allSatisfied() const { return core_->allSatisfied(); }
+};
 
-#define MOCK_METHOD_VOID4(Name, T0, T1, T2, T3)     \
-  public:                                                          \
-    TmockCore<void, T0, T1, T2, T3> core_##Name;  \
-    void Name(T0 tmock_a0, T1 tmock_a1, T2 tmock_a2, \
-              T3 tmock_a3) override {                     \
-      core_##Name.call(tmock_a0, tmock_a1,              \
-                        tmock_a2, tmock_a3);            \
-    }
+template <typename Ret, typename... Args, typename... Ms>
+_TmockCall<Ret, Args...>
+make_tmock_call(TmockCore<Ret, Args...>& c, std::tuple<Ms...> matchers) {
+    return _TmockCall<Ret, Args...>(&c, std::move(matchers));
+}
 
-#define MOCK_METHOD_VOID5(Name, T0, T1, T2, T3, T4) \
-  public:                                                          \
-    TmockCore<void, T0, T1, T2, T3, T4> core_##Name; \
-    void Name(T0 tmock_a0, T1 tmock_a1, T2 tmock_a2,    \
-              T3 tmock_a3, T4 tmock_a4) override {         \
-      core_##Name.call(tmock_a0, tmock_a1,              \
-                        tmock_a2, tmock_a3, tmock_a4); \
-    }
+// EXPECT_CALL: mock, methodName, Ret, (ArgTypes...), matchers...
+#define EXPECT_CALL(mock_obj, methodName, Ret, types_tuple, ...) \
+    make_tmock_call<Ret, TMOCK_UNPACK types_tuple>(            \
+        (mock_obj.core_##methodName), std::make_tuple(__VA_ARGS__))
+#define TMOCK_UNPACK(...) __VA_ARGS__
 
 // ============================================================
-//  Sequence（时序校验）
+// ============================================================
+//  MOCK_METHOD 宏（括号包裹类型，gMock 风格）
+// 用法：MOCK_METHOD(Ret, Name, (T0, T1, ...))
+// 支持 0-8 参数
+// ============================================================
+
+#define TMOCK_NARG_(...) TMOCK_ARG_N(__VA_ARGS__)
+#define TMOCK_ARG_N(_1,_2,_3,_4,_5,_6,_7,_8,N,...) N
+#define TMOCK_RSEQ_N() 8,7,6,5,4,3,2,1,0
+#define TMOCK_NARG(...) TMOCK_NARG_(__VA_ARGS__,TMOCK_RSEQ_N())
+
+#define TMOCK_IMPL0(Ret,Name) TmockCore<Ret> core_##Name; Ret Name() override { return core_##Name.call(); }
+#define TMOCK_IMPL1(Ret,Name,T0) TmockCore<Ret,T0> core_##Name; Ret Name(T0 t0) override { return core_##Name.call(t0); }
+#define TMOCK_IMPL2(Ret,Name,T0,T1) TmockCore<Ret,T0,T1> core_##Name; Ret Name(T0 t0,T1 t1) override { return core_##Name.call(t0,t1); }
+#define TMOCK_IMPL3(Ret,Name,T0,T1,T2) TmockCore<Ret,T0,T1,T2> core_##Name; Ret Name(T0 t0,T1 t1,T2 t2) override { return core_##Name.call(t0,t1,t2); }
+#define TMOCK_IMPL4(Ret,Name,T0,T1,T2,T3) TmockCore<Ret,T0,T1,T2,T3> core_##Name; Ret Name(T0 t0,T1 t1,T2 t2,T3 t3) override { return core_##Name.call(t0,t1,t2,t3); }
+#define TMOCK_IMPL5(Ret,Name,T0,T1,T2,T3,T4) TmockCore<Ret,T0,T1,T2,T3,T4> core_##Name; Ret Name(T0 t0,T1 t1,T2 t2,T3 t3,T4 t4) override { return core_##Name.call(t0,t1,t2,t3,t4); }
+#define TMOCK_IMPL6(Ret,Name,T0,T1,T2,T3,T4,T5) TmockCore<Ret,T0,T1,T2,T3,T4,T5> core_##Name; Ret Name(T0 t0,T1 t1,T2 t2,T3 t3,T4 t4,T5 t5) override { return core_##Name.call(t0,t1,t2,t3,t4,t5); }
+#define TMOCK_IMPL7(Ret,Name,T0,T1,T2,T3,T4,T5,T6) TmockCore<Ret,T0,T1,T2,T3,T4,T5,T6> core_##Name; Ret Name(T0 t0,T1 t1,T2 t2,T3 t3,T4 t4,T5 t5,T6 t6) override { return core_##Name.call(t0,t1,t2,t3,t4,t5,t6); }
+#define TMOCK_IMPL8(Ret,Name,T0,T1,T2,T3,T4,T5,T6,T7) TmockCore<Ret,T0,T1,T2,T3,T4,T5,T6,T7> core_##Name; Ret Name(T0 t0,T1 t1,T2 t2,T3 t3,T4 t4,T5 t5,T6 t6,T7 t7) override { return core_##Name.call(t0,t1,t2,t3,t4,t5,t6,t7); }
+
+#define TMOCK_DISPATCH_(Ret,Name,N,...) TMOCK_IMPL##N(Ret,Name,__VA_ARGS__)
+#define TMOCK_DISPATCH__(Ret,Name,N,...) TMOCK_DISPATCH_(Ret,Name,N,__VA_ARGS__)
+#define MOCK_METHOD(Ret,Name,types) TMOCK_DISPATCH__(Ret,Name,TMOCK_NARG types,TMOCK_UNPACK types)
+
+// void 特化版本
+#define TMOCK_VIMPL0(Name) TmockCore<void> core_##Name; void Name() override { core_##Name.call(); }
+#define TMOCK_VIMPL1(Name,T0) TmockCore<void,T0> core_##Name; void Name(T0 t0) override { core_##Name.call(t0); }
+#define TMOCK_VIMPL2(Name,T0,T1) TmockCore<void,T0,T1> core_##Name; void Name(T0 t0,T1 t1) override { core_##Name.call(t0,t1); }
+#define TMOCK_VIMPL3(Name,T0,T1,T2) TmockCore<void,T0,T1,T2> core_##Name; void Name(T0 t0,T1 t1,T2 t2) override { core_##Name.call(t0,t1,t2); }
+#define TMOCK_VIMPL4(Name,T0,T1,T2,T3) TmockCore<void,T0,T1,T2,T3> core_##Name; void Name(T0 t0,T1 t1,T2 t2,T3 t3) override { core_##Name.call(t0,t1,t2,t3); }
+#define TMOCK_VIMPL5(Name,T0,T1,T2,T3,T4) TmockCore<void,T0,T1,T2,T3,T4> core_##Name; void Name(T0 t0,T1 t1,T2 t2,T3 t3,T4 t4) override { core_##Name.call(t0,t1,t2,t3,t4); }
+#define TMOCK_VIMPL6(Name,T0,T1,T2,T3,T4,T5) TmockCore<void,T0,T1,T2,T3,T4,T5> core_##Name; void Name(T0 t0,T1 t1,T2 t2,T3 t3,T4 t4,T5 t5) override { core_##Name.call(t0,t1,t2,t3,t4,t5); }
+#define TMOCK_VIMPL7(Name,T0,T1,T2,T3,T4,T5,T6) TmockCore<void,T0,T1,T2,T3,T4,T5,T6> core_##Name; void Name(T0 t0,T1 t1,T2 t2,T3 t3,T4 t4,T5 t5,T6 t6) override { core_##Name.call(t0,t1,t2,t3,t4,t5,t6); }
+#define TMOCK_VIMPL8(Name,T0,T1,T2,T3,T4,T5,T6,T7) TmockCore<void,T0,T1,T2,T3,T4,T5,T6,T7> core_##Name; void Name(T0 t0,T1 t1,T2 t2,T3 t3,T4 t4,T5 t5,T6 t6,T7 t7) override { core_##Name.call(t0,t1,t2,t3,t4,t5,t6,t7); }
+
+#define TMOCK_VDISPATCH_(Name,N,...) TMOCK_VIMPL##N(Name,__VA_ARGS__)
+#define TMOCK_VDISPATCH__(Name,N,...) TMOCK_VDISPATCH_(Name,N,__VA_ARGS__)
+#define MOCK_METHOD_VOID(Name,types) TMOCK_VDISPATCH__(Name,TMOCK_NARG types,TMOCK_UNPACK types)
+
+// ============================================================
+//  Verify
+// ============================================================
+struct MockViolation { std::string msg; };
+
+template <typename Ret, typename... Args>
+void Verify(const TmockCore<Ret, Args...>& c) {
+    const_cast<TmockCore<Ret, Args...>&>(c).verify();
+}
+
+// ============================================================
+//  Sequence
 // ============================================================
 struct TmockSequence {
-  std::vector<std::string> calls;
-  std::mutex mu;
-  bool enabled = false;
-
-  static TmockSequence& global() {
-    static TmockSequence seq;
-    return seq;
-  }
+    std::vector<std::string> calls;
+    std::mutex mu;
+    bool enabled = false;
+    static TmockSequence& global() { static TmockSequence s; return s; }
 };
 
 struct TmockScopedInSequence {
-  TmockScopedInSequence() { TmockSequence::global().enabled = true; }
-  ~TmockScopedInSequence() { TmockSequence::global().enabled = false; }
+    TmockScopedInSequence() { TmockSequence::global().enabled = true; }
+    ~TmockScopedInSequence() { TmockSequence::global().enabled = false; }
 };
 
-#define TMOCK_IN_SEQUENCE                                       \
-  TmockScopedInSequence _tmock_seq_obj_
+#define TMOCK_IN_SEQUENCE TmockScopedInSequence _tmock_seq_obj_
 
 inline void tmock_record_call(const std::string& label) {
-  auto& seq = TmockSequence::global();
-  if (!seq.enabled) return;
-  std::lock_guard<std::mutex> lock(seq.mu);
-  seq.calls.push_back(label);
+    auto& seq = TmockSequence::global();
+    if (!seq.enabled) return;
+    std::lock_guard<std::mutex> lock(seq.mu);
+    seq.calls.push_back(label);
 }
 
-inline bool tmock_verify_order(const std::string& label1,
-                                const std::string& label2) {
-  auto& seq = TmockSequence::global();
-  std::lock_guard<std::mutex> lock(seq.mu);
-  size_t p1 = seq.calls.size(), p2 = seq.calls.size();
-  for (size_t i = 0; i < seq.calls.size(); i++) {
-    if (seq.calls[i] == label1) p1 = i;
-    if (seq.calls[i] == label2) p2 = i;
-  }
-  return p1 < p2 && p1 < seq.calls.size() && p2 < seq.calls.size();
+inline bool tmock_verify_order(const std::string& a, const std::string& b) {
+    auto& seq = TmockSequence::global();
+    std::lock_guard<std::mutex> lock(seq.mu);
+    size_t pa = seq.calls.size(), pb = seq.calls.size();
+    for (size_t i = 0; i < seq.calls.size(); i++) {
+        if (seq.calls[i] == a) pa = i;
+        if (seq.calls[i] == b) pb = i;
+    }
+    return pa < seq.calls.size() && pb < seq.calls.size() && pa < pb;
 }
 
-#define TMOCK_EXPECT_ORDER_BEFORE(label1, label2)              \
-  do {                                                          \
-    if (!tmock_verify_order(label1, label2)) {                 \
-      std::cerr << "[Tmock] ORDER FAILED: " << label1          \
-                << " should be before " << label2 << std::endl; \
-    }                                                           \
-  } while (0)
+#define TMOCK_EXPECT_ORDER_BEFORE(a, b) \
+    do { if (!tmock_verify_order(a,b)) \
+        std::cerr << "[Tmock] ORDER FAILED: " << a << " should be before " << b << std::endl; \
+    } while(0)
 
 #endif  // TMOCK_H_
