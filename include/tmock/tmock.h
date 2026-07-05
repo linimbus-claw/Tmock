@@ -1,16 +1,17 @@
 // tmock.h - Tmock C++17 Mock Framework (header-only)
 //
-// v1.0.1 - EXPECT_CALL + built-in matchers
+// v1.1.0 - EXPECT_CALL auto type deduction
 //
 // 用法：
 //   MOCK_METHOD(Ret, Name, (T0, T1, ...))   // 括号包裹类型
-//   EXPECT_CALL(mock, Name, Ret, (T0,T1,...), matchers...).Return(val).Times(n)
+//   EXPECT_CALL(mock, Name, matchers...).Return(val).Times(n)
 //
 // Matchers: _  An<T>()  Eq(v)  Matcher(fn)  HasPrefix(s)  Not(m)
 
 #ifndef TMOCK_H_
 #define TMOCK_H_
 
+#include <any>
 #include <chrono>
 #include <functional>
 #include <iostream>
@@ -88,7 +89,11 @@ template <typename T> struct _TmockArg { using type = T; };
 // 比较单个值
 template <typename E, typename A>
 bool tmock_cmp(const E& expected, const A& actual) {
-    if constexpr (TmockHasMatches<E, const A&>::value) {
+    if constexpr (std::is_same_v<std::decay_t<E>, std::any>) {
+        if (auto* p = std::any_cast<std::decay_t<A>>(&expected))
+            return *p == actual;
+        return false;
+    } else if constexpr (TmockHasMatches<E, const A&>::value) {
         return expected.matches(actual);
     } else if constexpr (std::is_invocable_v<E, A>) {
         return expected(actual);
@@ -252,7 +257,8 @@ private:
 //  EXPECT_CALL
 //
 // 设计：matchers 存入 std::tuple<Ms...>，index_sequence 逐个比较
-// 用法：EXPECT_CALL(mock, login, bool, (const string&, int), "alice", _).Return(true)
+// 用法：EXPECT_CALL(mock, login, "alice", _).Return(true)
+// Ret 和 Args 由 TmockCore<Ret,Args...> 自动推导，无需手动指定
 //
 // 链式方法：.Return(val) .Invoke(fn) .Times(n) .AtLeast(n) .with(fn)
 // ============================================================
@@ -277,6 +283,7 @@ class _TmockCall {
 
     template <typename... Ms>
     static bool match_tuple(const std::tuple<Ms...>& ms, const Args&... actual) {
+        if constexpr (sizeof...(Ms) == 0) return true;
         return match_tuple_impl(ms, actual..., std::make_index_sequence<sizeof...(Ms)>{});
     }
 
@@ -286,10 +293,14 @@ public:
     template <typename... Ms>
     _TmockCall(TmockCore<Ret, Args...>* c, std::tuple<Ms...> matchers)
         : core_(c) {
-        auto ms_copy = matchers;
-        matcher_fn_ = [ms_copy](const Args&... actual) -> bool {
-            return match_tuple(ms_copy, actual...);
-        };
+        if constexpr (sizeof...(Ms) == 0) {
+            matcher_fn_ = [](const Args&...) -> bool { return true; };
+        } else {
+            auto ms_copy = matchers;
+            matcher_fn_ = [ms_copy](const Args&... actual) -> bool {
+                return match_tuple(ms_copy, actual...);
+            };
+        }
     }
 
     // 复用同一个 Expectation：matcher_fn_ 来自构造函数的 matchers，
@@ -354,10 +365,11 @@ make_tmock_call(TmockCore<Ret, Args...>& c, std::tuple<Ms...> matchers) {
     return _TmockCall<Ret, Args...>(&c, std::move(matchers));
 }
 
-// EXPECT_CALL: mock, methodName, Ret, (ArgTypes...), matchers...
-#define EXPECT_CALL(mock_obj, methodName, Ret, types_tuple, ...) \
-    make_tmock_call<Ret, TMOCK_UNPACK types_tuple>(            \
-        (mock_obj.core_##methodName), std::make_tuple(__VA_ARGS__))
+// EXPECT_CALL: mock, methodName, matchers...
+// Ret 和 Args 由 TmockCore<Ret,Args...> 自动推导
+#define EXPECT_CALL(mock_obj, methodName, ...) \
+    make_tmock_call((mock_obj.core_##methodName), std::make_tuple(__VA_ARGS__))
+
 #define TMOCK_UNPACK(...) __VA_ARGS__
 
 // ============================================================

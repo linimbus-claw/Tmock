@@ -24,7 +24,7 @@ int main() {
     // Test 1: 基础返回值注入
     {
         MockUserService mock;
-        EXPECT_CALL(mock, login, bool, (const std::string&, int), "alice", _).Return(true);
+        EXPECT_CALL(mock, login, "alice", _).Return(true);
 
         bool result = mock.login("alice", 1234);
         assert(result == true);
@@ -45,7 +45,7 @@ int main() {
     // Test 3: 次数饱和
     {
         MockUserService mock;
-        EXPECT_CALL(mock, login, bool, (const std::string&, int), "alice", _)
+        EXPECT_CALL(mock, login, "alice", _)
             .Return(true).Times(3);
 
         mock.login("alice", 1234);
@@ -59,7 +59,7 @@ int main() {
     // Test 4: AtLeast
     {
         MockUserService mock;
-        EXPECT_CALL(mock, login, bool, (const std::string&, int), "alice", _)
+        EXPECT_CALL(mock, login, "alice", _)
             .Return(true).AtLeast(2);
 
         mock.login("alice", 1234);
@@ -71,7 +71,7 @@ int main() {
     // Test 5: .with() 自定义 matcher
     {
         MockUserService mock;
-        EXPECT_CALL(mock, getScore, int, (const std::string&), An<std::string>())
+        EXPECT_CALL(mock, getScore, An<std::string>())
             .with([](const std::string& u){ return u.find("vip_") == 0; })
             .Return(999).Times(1);
 
@@ -85,9 +85,9 @@ int main() {
     // Test 6: 多预期按序匹配
     {
         MockUserService mock;
-        EXPECT_CALL(mock, login, bool, (const std::string&, int), "alice", Eq(1111))
+        EXPECT_CALL(mock, login, "alice", Eq(1111))
             .Return(false);
-        EXPECT_CALL(mock, login, bool, (const std::string&, int), "alice", Eq(2222))
+        EXPECT_CALL(mock, login, "alice", Eq(2222))
             .Return(true);
 
         assert(mock.login("alice", 1111) == false);

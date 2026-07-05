@@ -1,5 +1,5 @@
 // tests/test_all.cpp - Tmock v1.0 comprehensive test
-// EXPECT_CALL(mock, Name, Ret, (T0,T1,...), matchers...).Return(val).Times(n)
+// EXPECT_CALL(mock, Name, matchers...).Return(val).Times(n)
 
 #include <cassert>
 #include <iostream>
@@ -7,6 +7,7 @@
 #include <thread>
 #include <chrono>
 #include <functional>
+#include <any>
 #include "tmock/tmock.h"
 
 using namespace std;
@@ -35,7 +36,7 @@ int main() {
     cout << "  [1] wildcard _ + Eq matcher..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, login, bool, (const string&, int), _, Eq(1234)).Return(true);
+        EXPECT_CALL(m, login, _, Eq(1234)).Return(true);
         assert(m.login("alice", 1234));
         Verify(m.core_login);
         cout << "  [PASS]" << endl;
@@ -45,7 +46,7 @@ int main() {
     cout << "  [2] An<int>()..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, login, bool, (const string&, int), "bob", An<int>()).Return(false);
+        EXPECT_CALL(m, login, "bob", An<int>()).Return(false);
         assert(!m.login("bob", 9999));
         Verify(m.core_login);
         cout << "  [PASS]" << endl;
@@ -55,7 +56,7 @@ int main() {
     cout << "  [3] Matcher<string>(lambda)..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, query, int, (const string&),
+        EXPECT_CALL(m, query,
             Matcher<string>([](const string& s){ return s.find("SELECT") == 0; }))
             .Return(42);
         assert(m.query("SELECT * FROM users") == 42);
@@ -67,7 +68,7 @@ int main() {
     cout << "  [4] HasPrefix..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, query, int, (const string&), HasPrefix("INSERT")).Return(1);
+        EXPECT_CALL(m, query, HasPrefix("INSERT")).Return(1);
         assert(m.query("INSERT INTO t VALUES(1)") == 1);
         Verify(m.core_query);
         cout << "  [PASS]" << endl;
@@ -77,7 +78,7 @@ int main() {
     cout << "  [5] string literal vs const string&..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, query, int, (const string&), "SELECT 1").Return(99);
+        EXPECT_CALL(m, query, "SELECT 1").Return(99);
         assert(m.query("SELECT 1") == 99);
         Verify(m.core_query);
         cout << "  [PASS]" << endl;
@@ -87,8 +88,8 @@ int main() {
     cout << "  [6] multiple expectations..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, login, bool, (const string&, int), "alice", 1).Return(false);
-        EXPECT_CALL(m, login, bool, (const string&, int), "alice", 2).Return(true);
+        EXPECT_CALL(m, login, "alice", 1).Return(false);
+        EXPECT_CALL(m, login, "alice", 2).Return(true);
         assert(!m.login("alice", 1));
         assert(m.login("alice", 2));
         Verify(m.core_login);
@@ -99,7 +100,7 @@ int main() {
     cout << "  [7] Times(n)..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, login, bool, (const string&, int), "carol", 8888).Times(3).Return(true);
+        EXPECT_CALL(m, login, "carol", 8888).Times(3).Return(true);
         m.login("carol", 8888);
         m.login("carol", 8888);
         m.login("carol", 8888);
@@ -111,7 +112,7 @@ int main() {
     cout << "  [8] AtLeast + Return..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, query, int, (const string&), "ping").AtLeast(2).Return(1);
+        EXPECT_CALL(m, query, "ping").AtLeast(2).Return(1);
         m.query("ping");
         m.query("ping");
         m.query("ping");
@@ -123,7 +124,7 @@ int main() {
     cout << "  [9] Times(lo,hi)..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, query, int, (const string&), "check").Times(1,3).Return(7);
+        EXPECT_CALL(m, query, "check").Times(1,3).Return(7);
         m.query("check");
         Verify(m.core_query);
         cout << "  [PASS]" << endl;
@@ -133,7 +134,7 @@ int main() {
     cout << "  [10] .with() custom matcher..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, query, int, (const string&), "xyz")
+        EXPECT_CALL(m, query, "xyz")
             .with([](const string& s){ return s == "xyz"; })
             .Return(88);
         assert(m.query("xyz") == 88);
@@ -145,7 +146,7 @@ int main() {
     cout << "  [11] Return().Times() chain..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, login, bool, (const string&, int), "dave", 111)
+        EXPECT_CALL(m, login, "dave", 111)
             .Return(true).Times(2);
         assert(m.login("dave", 111));
         assert(m.login("dave", 111));
@@ -167,7 +168,7 @@ int main() {
     cout << "  [13] async callback..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, execute, void, (const string&, function<void(bool)>), _, _)
+        EXPECT_CALL(m, execute, _, _)
             .Invoke([](const string&, function<void(bool)> cb){ cb(true); });
         bool ok = false;
         m.execute("DROP t", [&](bool r){ ok = r; });
@@ -180,7 +181,7 @@ int main() {
     cout << "  [14] async delayed callback..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, execute, void, (const string&, function<void(bool)>), "slow", _)
+        EXPECT_CALL(m, execute, "slow", _)
             .Invoke([](const string&, function<void(bool)> cb){
                 thread([cb](){
                     this_thread::sleep_for(chrono::milliseconds(50));
@@ -199,7 +200,7 @@ int main() {
     cout << "  [15] Not matcher..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, login, bool, (const string&, int), Not(Eq(std::string("hacker"))), _).Return(true);
+        EXPECT_CALL(m, login, Not(Eq(std::string("hacker"))), _).Return(true);
         assert(m.login("admin", 0));
         Verify(m.core_login);
         cout << "  [PASS]" << endl;
@@ -209,7 +210,7 @@ int main() {
     cout << "  [16] fetch string return..." << endl;
     {
         MockDatabase m;
-        EXPECT_CALL(m, fetch, string, (const string&, int), "users", 42).Return(string("alice"));
+        EXPECT_CALL(m, fetch, "users", 42).Return(string("alice"));
         assert(m.fetch("users", 42) == "alice");
         Verify(m.core_fetch);
         cout << "  [PASS]" << endl;
@@ -222,9 +223,9 @@ int main() {
         { lock_guard<mutex> lock(seq.mu); seq.calls.clear(); }
         seq.enabled = true;
         MockDatabase m;
-        EXPECT_CALL(m, query, int, (const string&), "BEGIN").Invoke(
+        EXPECT_CALL(m, query, "BEGIN").Invoke(
             [](const string&) -> int { tmock_record_call("BEGIN"); return 0; });
-        EXPECT_CALL(m, query, int, (const string&), "COMMIT").Invoke(
+        EXPECT_CALL(m, query, "COMMIT").Invoke(
             [](const string&) -> int { tmock_record_call("COMMIT"); return 0; });
         m.query("BEGIN");
         m.query("COMMIT");
@@ -234,6 +235,38 @@ int main() {
         cout << "  [PASS]" << endl;
     }
 
-    cout << "\n  ALL 17 TESTS PASSED!" << endl;
+    // [18] std::any matcher
+    cout << "  [18] std::any matcher..." << endl;
+    {
+        MockDatabase m;
+        any val = string("alice");
+        EXPECT_CALL(m, login, val, _).Return(true);
+        assert(m.login("alice", 9999));
+        Verify(m.core_login);
+
+        any val2 = 42;
+        EXPECT_CALL(m, fetch, string("users"), val2).Return(string("bob"));
+        assert(m.fetch("users", 42) == "bob");
+        Verify(m.core_fetch);
+        cout << "  [PASS]" << endl;
+    }
+
+    // [19] zero matchers = all wildcards
+    cout << "  [19] zero matchers (all wildcards)..." << endl;
+    {
+        MockDatabase m;
+        EXPECT_CALL(m, query).Return(100).Times(2);
+        assert(m.query("anything") == 100);
+        assert(m.query("whatever") == 100);
+        Verify(m.core_query);
+
+        EXPECT_CALL(m, login).Return(true).Times(2);
+        assert(m.login("any", 0));
+        assert(m.login("body", 999));
+        Verify(m.core_login);
+        cout << "  [PASS]" << endl;
+    }
+
+    cout << "\n  ALL 19 TESTS PASSED!" << endl;
     return 0;
 }

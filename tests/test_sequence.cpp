@@ -32,11 +32,11 @@ int main() {
         seq.enabled = true;
 
         MockDataService mock;
-        EXPECT_CALL(mock, send, void, (const std::string&), _)
+        EXPECT_CALL(mock, send, _)
             .Invoke([](const std::string& d) {
                 tmock_record_call("send:" + d);
             });
-        EXPECT_CALL(mock, ack, bool, (int), _)
+        EXPECT_CALL(mock, ack, _)
             .Invoke([](int id) {
                 tmock_record_call("ack:" + std::to_string(id));
                 return true;
@@ -61,11 +61,11 @@ int main() {
         seq.enabled = true;
 
         MockDataService mock;
-        EXPECT_CALL(mock, send, void, (const std::string&), _)
+        EXPECT_CALL(mock, send, _)
             .Invoke([](const std::string& d) {
                 tmock_record_call("send:" + d);
             });
-        EXPECT_CALL(mock, ack, bool, (int), _)
+        EXPECT_CALL(mock, ack, _)
             .Invoke([](int id) {
                 tmock_record_call("ack:" + std::to_string(id));
                 return true;

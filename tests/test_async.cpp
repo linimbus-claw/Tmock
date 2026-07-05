@@ -25,7 +25,7 @@ int main() {
     {
         MockNetwork mock;
         bool done = false;
-        EXPECT_CALL(mock, request, void, (const std::string&, std::function<void(bool)>), _, _)
+        EXPECT_CALL(mock, request, _, _)
             .Invoke([](const std::string&, std::function<void(bool)> cb) {
                 cb(true);
             });
@@ -40,7 +40,7 @@ int main() {
     {
         MockNetwork mock;
         std::function<void(bool)> saved_cb;
-        EXPECT_CALL(mock, request, void, (const std::string&, std::function<void(bool)>), _, _)
+        EXPECT_CALL(mock, request, _, _)
             .Invoke([&](const std::string&, std::function<void(bool)> cb) {
                 saved_cb = cb;
             });
@@ -58,7 +58,7 @@ int main() {
     {
         MockNetwork mock;
         int callCount = 0;
-        EXPECT_CALL(mock, request, void, (const std::string&, std::function<void(bool)>), _, _)
+        EXPECT_CALL(mock, request, _, _)
             .Times(2)
             .Invoke([&](const std::string&, std::function<void(bool)> cb) {
                 ++callCount;
