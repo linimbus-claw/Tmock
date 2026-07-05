@@ -1,171 +1,122 @@
-# Tmock v0.8.0
+# Tmock
 
-Header-only C++17 Mock Framework —— 轻量、易用、单文件。
+Header-only C++17 mock framework. 支持继承式打桩、std::function 异步接口、多接口调用顺序校验。
 
-## 特性
+## 设计原则
 
-- ✅ **Header-only**，只需 `#include "tmock/tmock.h"`
-- ✅ **继承式打桩**，符合 C++ OOP 习惯
-- ✅ **同步 / 异步接口** 统一支持（`std::function` 回调）
-- ✅ **参数匹配**：精确值 / 自定义 lambda matcher
-- ✅ **调用次数校验**：`times(n)` / `times(lo,hi)` / `atLeast(n)`
-- ✅ **调用时序校验**：`TMOCK_IN_SEQUENCE` + `TMOCK_EXPECT_ORDER_BEFORE`
-- ✅ **多线程安全**：`TmockCore` 内部用 `std::mutex` 保护
-- ✅ **析构时自动 verify**，未满足的期望自动报错
+- **header-only**: 一行 `#include "tmock/tmock.h"` 即可使用
+- **无需代码生成**: 纯模板 + 宏，编译时完成所有工作
+- **线程安全**: 所有内部状态受 `std::mutex` 保护
 
 ## 快速开始
 
-### 1. 定义接口
-
 ```cpp
-// userService.h
-#include <string>
-
-class UserService {
-public:
-    virtual ~UserService() = default;
-    virtual bool login(const std::string& user, int pwd) = 0;
-    virtual int  getScore(const std::string& user) = 0;
-};
-```
-
-### 2. 用宏生成 Mock
-
-```cpp
-// mock_user_service.h
 #include "tmock/tmock.h"
-#include "userService.h"
 
-class MockUserService : public UserService {
+// 1. 定义接口（纯虚类）
+class Database {
 public:
-    // 同步方法：2 个参数
-    MOCK_METHOD2(bool, login, const std::string&, int);
-    // 同步方法：1 个参数
-    MOCK_METHOD1(int, getScore, const std::string&);
+    virtual ~Database() = default;
+    virtual bool login(const std::string& user, int pwd) = 0;
+    virtual int query(const std::string& sql) = 0;
+    virtual void asyncFetch(const std::string& key,
+                            std::function<void(const std::string&)> cb) = 0;
+};
+
+// 2. 用 MOCK_METHOD 声明 mock 类
+class MockDatabase : public Database {
+public:
+    MOCK_METHOD(bool, login, (const std::string&, int));
+    MOCK_METHOD(int, query, (const std::string&));
+    MOCK_METHOD(void, asyncFetch, (const std::string&, std::function<void(const std::string&)>));
 };
 ```
 
-### 3. 在测试中打桩
+## EXPECT_CALL 用法
 
 ```cpp
-#include "mock_user_service.h"
-#include <cassert>
+MockDatabase m;
 
-void test_login_success() {
-    MockUserService mock;
+// 基本用法：参数匹配 + 返回值
+EXPECT_CALL(m, login, bool, (const std::string&, int), "alice", Eq(1234))
+    .Return(true);
 
-    // 设置预期：login("alice", 1234) 返回 true，只调用 1 次
-    mock.core_login.expect("alice", 1234)
-        .willReturn(true)
-        .times(1);
+// 通配符 + 自定义 matcher
+EXPECT_CALL(m, query, int, (const std::string&), An<std::string>())
+    .with([](const std::string& s){ return s.find("SELECT") == 0; })
+    .Return(42)
+    .Times(3);
 
-    // 调用被测代码
-    bool result = mock.login("alice", 1234);
-    assert(result == true);
-}  // 离开作用域时自动 verify
-```
-
-### 4. 异步接口
-
-```cpp
-class ProfileService {
-public:
-    virtual void getProfile(const std::string& user,
-                            std::function<void(const std::string&, int)> cb) = 0;
-};
-
-class MockProfileService : public ProfileService {
-public:
-    MOCK_METHOD_VOID2(getProfile,
-                         const std::string&,
-                         std::function<void(const std::string&, int)>);
-};
-
-void test_async() {
-    MockProfileService mock;
-
-    mock.core_getProfile.addExpectation()
-        .withArgs("alice",
-                    std::function<void(const std::string&, int)>{})
-        .willInvoke([](const std::string& user,
-                      std::function<void(const std::string&, int)> cb) {
-            // 立即回调
-            cb("Alice", 100);
-        })
-        .times(1);
-
-    mock.getProfile("alice", [](const std::string& n, int s) {
-        assert(n == "Alice");
-        assert(s == 100);
-    });
-}
-```
-
-### 5. 调用时序校验
-
-```cpp
-void test_order() {
-    TMOCK_IN_SEQUENCE;  // 开启时序记录
-
-    MockDataService mock;
-    mock.core_send.addExpectation().willInvoke([](const std::string& d) {
-        tmock_record_call("send");
-    });
-    mock.core_ack.addExpectation().willInvoke([](int id) {
-        tmock_record_call("ack");
-        return true;
+// 异步回调
+EXPECT_CALL(m, asyncFetch, void, (const std::string&, std::function<void(const std::string&)>), _, _)
+    .Invoke([](const std::string&, std::function<void(const std::string&)> cb) {
+        cb("mocked result");
     });
 
-    mock.send("hello");
-    mock.ack(1);
-
-    // 校验顺序
-    TMOCK_EXPECT_ORDER_BEFORE("send", "ack");
-}
+// 多次匹配
+EXPECT_CALL(m, login, bool, (const std::string&, int), _, _)
+    .Return(false)
+    .AtLeast(2);
 ```
 
-## 宏参考
+## 内置 Matcher
 
-| 宏 | 说明 |
-|---|---|
-| `MOCK_METHOD0(Ret, Name)` | 0 参数，返回 `Ret` |
-| `MOCK_METHOD1(Ret, Name, T0)` | 1 参数 |
-| `MOCK_METHOD2(Ret, Name, T0, T1)` | 2 参数 |
-| `MOCK_METHOD3(Ret, Name, T0, T1, T2)` | 3 参数 |
-| `MOCK_METHOD4(Ret, Name, T0, T1, T2, T3)` | 4 参数 |
-| `MOCK_METHOD5(Ret, Name, T0, T1, T2, T3, T4)` | 5 参数 |
-| `MOCK_METHOD_VOID0(Name)` | `void` 返回，0 参数 |
-| `MOCK_METHOD_VOID1(Name, T0)` | `void` 返回，1 参数 |
-| ... | ... |
+| Matcher | 说明 |
+|---------|------|
+| `_` | 匹配任意值 |
+| `Eq(v)` | 精确等于 `v` |
+| `An<T>()` | 匹配任意 `T` 类型值 |
+| `HasPrefix(s)` | 字符串前缀匹配 |
+| `Matcher<T>(fn)` | 自定义 predicate |
+| `Not(m)` | 取反 |
 
-## Fluent API（`TmockExpectation`）
+## 链式方法
 
 ```cpp
-auto& e = mock.core_xxx.addExpectation();
-e.withArgs(expected1, expected2, ...)  // 参数精确匹配
- .with([](args...) { return ...; })  // 自定义 matcher
- .willReturn(value)                 // 返回值
- .willInvoke([](args...) { ... })    // 自定义逻辑
- .times(1)                          // 精确次数
- .times(1, 3)                      // 范围次数
- .atLeast(2);                       // 最少次数
+EXPECT_CALL(mock, method, Ret, (Args...), matchers...)
+    .Return(val)                    // 指定返回值
+    .Invoke(fn)                     // 自定义回调函数
+    .Times(n)                       // 精确次数
+    .Times(lo, hi)                  // 范围次数
+    .AtLeast(n)                     // 最少次数
+    .with(fn)                       // 自定义参数匹配
+    .WillRepeatedly(fn)             // 重复使用的默认行为
 ```
 
-## 构建测试
+## 顺序校验
+
+```cpp
+auto& seq = TmockSequence::global();
+seq.enabled = true;
+
+mock.login("alice", 1234);
+mock.commit();
+
+assert(tmock_verify_order("login_ok", "commit_ok"));
+seq.enabled = false;
+```
+
+## 测试覆盖
+
+```
+test_all.cpp     17 个测试用例
+test_basic.cpp    6 个测试用例
+test_async.cpp    3 个测试用例
+test_sequence.cpp 2 个测试用例
+```
+
+## 编译
 
 ```bash
-mkdir build && cd build
-cmake ..
-make
-ctest
+g++ -std=c++17 -I include tests/test_basic.cpp -o test_basic
+./test_basic
 ```
 
-## 依赖
+## 版本
 
-- C++17 编译器（GCC 7+, Clang 5+, MSVC 2017+）
-- CMake 3.10+
-- 无第三方库依赖
+- **v1.0.1**: EXPECT_CALL API + 内置 matchers + 4 套测试全通过
+- v0.x: 早期原型（已废弃）
 
-## License
+## 许可证
 
 MIT
